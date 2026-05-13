@@ -227,6 +227,175 @@ export async function getAllOpponents(): Promise<OpponentProfile[]> {
   });
 }
 
+// ── Compute opponent stats from hand records ──────────────────────────────
+
+function classifyPlayer(vpip: number, pfr: number, af: number, wtsd: number): OpponentProfile['playerType'] {
+  if (vpip < 10 && pfr < 8) return 'nit';
+  if (vpip > 40) return 'calling_station';
+  if (vpip > 30 && pfr < 12) return 'fish';
+  if (vpip > 25 && af > 2.5) return 'lag';
+  if (vpip >= 18 && vpip <= 28 && pfr >= 14 && pfr <= 24) return 'tag';
+  return 'unknown';
+}
+
+export async function computeOpponentProfiles(): Promise<void> {
+  // Collect all hands across all sessions
+  const sessions = await getAllSessions();
+  const allHands: HandRecord[] = [];
+  for (const s of sessions) {
+    const h = await getHandsForSession(s.id);
+    allHands.push(...h);
+  }
+
+  if (allHands.length === 0) return;
+
+  // Group hands by opponent
+  const byOpponent: Record<string, HandRecord[]> = {};
+  for (const hand of allHands) {
+    if (!hand.opponent) continue;
+    byOpponent[hand.opponent] = byOpponent[hand.opponent] ?? [];
+    byOpponent[hand.opponent].push(hand);
+  }
+
+  // VPIP: count hands where opponent voluntarily put money in preflop (call, raise, 3bet, 4bet)
+  const vpipActions = new Set(['call', 'raise', '3bet', '4bet', 'bluff', 'value_bet', 'cbet', 'check_raise', 'float', 'hero_call']);
+
+  for (const [name, hands] of Object.entries(byOpponent)) {
+    if (hands.length < 3) continue;
+
+    let vpipCount = 0;
+    let pfrCount = 0;
+    let totalBets = 0;
+    let totalCalls = 0;
+    let showdowns = 0;
+    let wonShowdowns = 0;
+    let riverSeen = 0;
+    let riverCalled = 0;
+
+    for (const hand of hands) {
+      const stage = hand.stage;
+      const action = hand.action.toLowerCase();
+
+      if (stage === 'preflop') {
+        if (vpipActions.has(action) || action === 'call') vpipCount++;
+        if (['raise', '3bet', '4bet'].includes(action)) pfrCount++;
+      }
+
+      // Aggression: bets and raises vs calls
+      if (['bet', 'raise', '3bet', '4bet', 'cbet', 'check_raise', 'bluff'].includes(action)) totalBets++;
+      if (['call', 'hero_call'].includes(action)) totalCalls++;
+
+      // Showdown
+      if (stage === 'river' || action === 'showdown') {
+        showdowns++;
+        if ((hand.result ?? 0) > 0) wonShowdowns++;
+      }
+
+      // River call
+      if (stage === 'river') {
+        riverSeen++;
+        if (['call', 'hero_call'].includes(action)) riverCalled++;
+      }
+    }
+
+    const vpip = Math.round((vpipCount / hands.length) * 100);
+    const pfr = Math.round((pfrCount / hands.length) * 100);
+    const af = totalCalls > 0 ? totalBets / totalCalls : totalBets > 0 ? totalBets : 0;
+    const wtsd = Math.round((showdowns / hands.length) * 100);
+    const w$sd = showdowns > 0 ? Math.round((wonShowdowns / showdowns) * 100) : 0;
+    const riverCall = riverSeen > 0 ? Math.round((riverCalled / riverSeen) * 100) : 0;
+
+    await upsertOpponent({
+      name,
+      hands: hands.length,
+      vpip,
+      pfr,
+      af: Math.round(af * 10) / 10,
+      wtsd,
+      w$sd,
+      riverCall,
+      playerType: classifyPlayer(vpip, pfr, af, wtsd),
+    });
+  }
+}
+
+// ── Session detail stats ──────────────────────────────────────────────────
+
+export async function computeSessionDetail(sessionId: string): Promise<{
+  session: Session | null;
+  stats: {
+    totalHands: number;
+    wonHands: number;
+    totalProfit: number;
+    byPosition: Record<string, { hands: number; profit: number }>;
+    byStage: Record<string, { hands: number; profit: number }>;
+    byAction: Record<string, { hands: number; profit: number }>;
+    byTag: Record<string, { count: number; profit: number }>;
+    byResult: { wins: number; losses: number; breakeven: number; totalProfit: number };
+    hourlyRate: number | null;
+  };
+}> {
+  const sessions = await getAllSessions();
+  const session = sessions.find((s) => s.id === sessionId) ?? null;
+  const hands = await getHandsForSession(sessionId);
+
+  const byPosition: Record<string, { hands: number; profit: number }> = {};
+  const byStage: Record<string, { hands: number; profit: number }> = {};
+  const byAction: Record<string, { hands: number; profit: number }> = {};
+  const byTag: Record<string, { count: number; profit: number }> = {};
+  let wonHands = 0;
+  let losses = 0;
+  let breakeven = 0;
+  let totalProfit = 0;
+
+  for (const hand of hands) {
+    const r = hand.result ?? 0;
+    totalProfit += r;
+    if (r > 0) wonHands++;
+    else if (r < 0) losses++;
+    else breakeven++;
+
+    if (hand.position) {
+      byPosition[hand.position] = byPosition[hand.position] ?? { hands: 0, profit: 0 };
+      byPosition[hand.position].hands++;
+      byPosition[hand.position].profit += r;
+    }
+    byStage[hand.stage] = byStage[hand.stage] ?? { hands: 0, profit: 0 };
+    byStage[hand.stage].hands++;
+    byStage[hand.stage].profit += r;
+
+    const act = hand.action ?? 'unknown';
+    byAction[act] = byAction[act] ?? { hands: 0, profit: 0 };
+    byAction[act].hands++;
+    byAction[act].profit += r;
+
+    for (const tag of hand.tags ?? []) {
+      byTag[tag] = byTag[tag] ?? { count: 0, profit: 0 };
+      byTag[tag].count++;
+      byTag[tag].profit += r;
+    }
+  }
+
+  // Duration in hours (rough estimate: assume 30 hands/hour for live, 60 for online)
+  const durationHours = (session?.duration ?? 0) / 60;
+  const hourlyRate = durationHours > 0 ? totalProfit / durationHours : null;
+
+  return {
+    session,
+    stats: {
+      totalHands: hands.length,
+      wonHands,
+      totalProfit,
+      byPosition,
+      byStage,
+      byAction,
+      byTag,
+      byResult: { wins: wonHands, losses, breakeven, totalProfit },
+      hourlyRate,
+    },
+  };
+}
+
 // ── Stats ────────────────────────────────────────────────────────────────
 
 export async function computeSessionStats(sessionId: string): Promise<{

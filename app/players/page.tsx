@@ -2,28 +2,29 @@
 
 import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { computeLeakReport, computeGlobalStats, getAllSessions, getHandsForSession, getAllOpponents, type LeakReport } from "@/lib/db";
-
-type Tab = "leaks" | "opponents" | "stats";
+import {
+  computeLeakReport,
+  computeGlobalStats,
+  computeSessionDetail,
+  computeOpponentProfiles,
+  getAllSessions,
+  getAllOpponents,
+  deleteSession,
+  type LeakReport,
+  type OpponentProfile,
+  type Session,
+} from "@/lib/db";
 
 const POSITION_ORDER = ['UTG', 'UTG1', 'MP', 'MP1', 'CO', 'BTN', 'SB', 'BB'];
-const STAGE_ORDER = ['preflop', 'flop', 'turn', 'river'];
+type Tab = "leaks" | "opponents" | "sessions";
+
+const STAGE_ORDER = ["preflop", "flop", "turn", "river"];
 
 const ACTION_LABELS: Record<string, string> = {
-  fold: "Fold",
-  check: "Check",
-  call: "Call",
-  bet: "Bet",
-  raise: "Raise",
-  "3bet": "3-Bet",
-  "4bet": "4-Bet",
-  bluff: "Bluff",
-  value_bet: "Value Bet",
-  hero_call: "Hero Call",
-  hero_fold: "Hero Fold",
-  cbet: "C-Bet",
-  check_raise: "Check-Raise",
-  float: "Float",
+  fold: "Fold", check: "Check", call: "Call", bet: "Bet", raise: "Raise",
+  "3bet": "3-Bet", "4bet": "4-Bet", bluff: "Bluff", value_bet: "Value Bet",
+  hero_call: "Hero Call", hero_fold: "Hero Fold", cbet: "C-Bet",
+  check_raise: "Check-Raise", float: "Float",
 };
 
 const SEVERITY_COLOR: Record<string, string> = {
@@ -32,28 +33,68 @@ const SEVERITY_COLOR: Record<string, string> = {
   low: "text-blue-400 bg-blue-500/10 border-blue-500/30",
 };
 
+const PLAYER_TYPE_COLORS: Record<string, string> = {
+  nit: "bg-purple-500/20 text-purple-300",
+  tag: "bg-green-500/20 text-green-300",
+  lag: "bg-yellow-500/20 text-yellow-300",
+  calling_station: "bg-orange-500/20 text-orange-300",
+  fish: "bg-red-500/20 text-red-300",
+  unknown: "bg-gray-500/20 text-gray-300",
+};
+
 export default function PlayersPage() {
   const [tab, setTab] = useState<Tab>("leaks");
   const [report, setReport] = useState<LeakReport | null>(null);
-  const [globalStats, setGlobalStats] = useState<{ totalSessions: number; totalHands: number; totalProfit: number; biggestWin: number; biggestLoss: number } | null>(null);
-  const [opponents, setOpponents] = useState<{ name: string; hands: number; playerType?: string; vpip?: number; pfr?: number; lastSeen: number }[]>([]);
+  const [globalStats, setGlobalStats] = useState<{
+    totalSessions: number; totalHands: number; totalProfit: number;
+    biggestWin: number; biggestLoss: number;
+  } | null>(null);
+  const [opponents, setOpponents] = useState<OpponentProfile[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [activeSession, setActiveSession] = useState<{
+    session: Session | null;
+    stats: Awaited<ReturnType<typeof computeSessionDetail>>["stats"] | null;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
-  const [minHandsForAnalysis] = useState(20);
+  const [rebuildingOpponents, setRebuildingOpponents] = useState(false);
+  const minHandsForAnalysis = 20;
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [r, gs, opp] = await Promise.all([
+    const [r, gs, opp, sess] = await Promise.all([
       computeLeakReport(),
       computeGlobalStats(),
       getAllOpponents(),
+      getAllSessions(),
     ]);
     setReport(r);
     setGlobalStats(gs);
     setOpponents(opp);
+    setSessions(sess);
     setLoading(false);
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  async function handleRebuildOpponents() {
+    setRebuildingOpponents(true);
+    await computeOpponentProfiles();
+    const opp = await getAllOpponents();
+    setOpponents(opp);
+    setRebuildingOpponents(false);
+  }
+
+  async function handleSelectSession(sessionId: string) {
+    const detail = await computeSessionDetail(sessionId);
+    setActiveSession(detail);
+  }
+
+  async function handleDeleteSession(sessionId: string) {
+    if (!confirm("Delete this session?")) return;
+    await deleteSession(sessionId);
+    setActiveSession(null);
+    await load();
+  }
 
   if (loading) {
     return (
@@ -90,14 +131,9 @@ export default function PlayersPage() {
       <div className="max-w-6xl mx-auto px-6 py-8">
         {/* Tabs */}
         <div className="flex gap-1 mb-8 border-b border-gray-800 pb-0">
-          {([["leaks", "Leak Detector"], ["opponents", "Opponents"], ["stats", "Session Stats"]] as const).map(([t, label]) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-                tab === t ? "border-[#1DB954] text-white" : "border-transparent text-gray-500 hover:text-gray-300"
-              }`}
-            >
+          {([["leaks", "Leak Detector"], ["opponents", "Opponents"], ["sessions", "Sessions"]] as const).map(([t, label]) => (
+            <button key={t} onClick={() => { setTab(t); setActiveSession(null); }}
+              className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors ${tab === t ? "border-[#1DB954] text-white" : "border-transparent text-gray-500 hover:text-gray-300"}`}>
               {label}
             </button>
           ))}
@@ -115,10 +151,8 @@ export default function PlayersPage() {
                   You have <span className="text-[#1DB954] font-mono">{report?.overall.totalHands ?? 0}</span> so far.
                 </p>
                 <div className="w-64 mx-auto h-2 rounded-full bg-gray-800 overflow-hidden">
-                  <div
-                    className="h-full bg-[#1DB954] rounded-full transition-all"
-                    style={{ width: `${Math.min(100, ((report?.overall.totalHands ?? 0) / minHandsForAnalysis) * 100)}%` }}
-                  />
+                  <div className="h-full bg-[#1DB954] rounded-full transition-all"
+                    style={{ width: `${Math.min(100, ((report?.overall.totalHands ?? 0) / minHandsForAnalysis) * 100)}%` }} />
                 </div>
                 <p className="text-xs text-gray-600 mt-2">{report?.overall.totalHands ?? 0} / {minHandsForAnalysis} hands</p>
                 <Link href="/session" className="inline-block mt-6 px-5 py-2 rounded-lg bg-[#1DB954] text-black text-sm font-semibold hover:bg-[#1ed86a] transition-colors">
@@ -130,27 +164,23 @@ export default function PlayersPage() {
                 {/* Overview */}
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                   {[
-                    { label: "Total Hands", value: report!.overall.totalHands.toLocaleString(), sub: "" },
+                    { label: "Total Hands", value: report!.overall.totalHands.toLocaleString() },
                     { label: "Net Profit", value: `${report!.overall.totalProfit >= 0 ? "+" : ""}${report!.overall.totalProfit.toFixed(2)}BB`,
-                      sub: "", color: report!.overall.totalProfit >= 0 ? "text-green-400" : "text-red-400" },
-                    { label: "Win Rate", value: `${report!.overall.winRate.toFixed(1)}%`, sub: "" },
+                      color: report!.overall.totalProfit >= 0 ? "text-green-400" : "text-red-400" },
+                    { label: "Win Rate", value: `${report!.overall.winRate.toFixed(1)}%` },
                     { label: "BB/100", value: `${report!.overall.bigBlindPer100 >= 0 ? "+" : ""}${report!.overall.bigBlindPer100.toFixed(2)}`,
-                      sub: "big blinds per 100", color: report!.overall.bigBlindPer100 >= 0 ? "text-green-400" : "text-red-400" },
-                  ].map((stat) => (
-                    <div key={stat.label} className="rounded-xl border border-gray-800 bg-[#161B22] p-4">
-                      <div className="text-xs text-gray-500 mb-1">{stat.label}</div>
-                      <div className={`text-2xl font-mono font-bold ${(stat as { color?: string }).color ?? "text-white"}`}>
-                        {stat.value}
-                      </div>
-                      {stat.sub && <div className="text-xs text-gray-600 mt-0.5">{stat.sub}</div>}
+                      color: report!.overall.bigBlindPer100 >= 0 ? "text-green-400" : "text-red-400" },
+                  ].map((s) => (
+                    <div key={s.label} className="rounded-xl border border-gray-800 bg-[#161B22] p-4">
+                      <div className="text-xs text-gray-500 mb-1">{s.label}</div>
+                      <div className={`text-2xl font-mono font-bold ${(s as { color?: string }).color ?? "text-white"}`}>{s.value}</div>
                     </div>
                   ))}
                 </div>
 
-                {/* Leaks */}
+                {/* Preflop + Post-flop leaks */}
                 {(report!.preflopLeak.length > 0 || report!.postflopLeak.length > 0) ? (
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {/* Preflop leaks */}
                     <div className="rounded-xl border border-gray-800 bg-[#161B22] p-5">
                       <div className="flex items-center gap-2 mb-4">
                         <span className="text-lg">📥</span>
@@ -163,9 +193,7 @@ export default function PlayersPage() {
                           {report!.preflopLeak.map((leak, i) => (
                             <div key={i} className={`p-3 rounded-lg border text-sm ${SEVERITY_COLOR[leak.severity]}`}>
                               <div className="flex items-center gap-2 mb-1">
-                                <span className={`w-1.5 h-1.5 rounded-full ${
-                                  leak.severity === 'high' ? 'bg-red-400' : leak.severity === 'medium' ? 'bg-yellow-400' : 'bg-blue-400'
-                                }`} />
+                                <span className={`w-1.5 h-1.5 rounded-full ${leak.severity === 'high' ? 'bg-red-400' : leak.severity === 'medium' ? 'bg-yellow-400' : 'bg-blue-400'}`} />
                                 <span className="font-medium capitalize">{leak.type.replace(/_/g, ' ')}</span>
                                 <span className="ml-auto text-xs opacity-70">{leak.severity}</span>
                               </div>
@@ -175,8 +203,6 @@ export default function PlayersPage() {
                         </div>
                       )}
                     </div>
-
-                    {/* Post-flop leaks */}
                     <div className="rounded-xl border border-gray-800 bg-[#161B22] p-5">
                       <div className="flex items-center gap-2 mb-4">
                         <span className="text-lg">📉</span>
@@ -189,9 +215,7 @@ export default function PlayersPage() {
                           {report!.postflopLeak.map((leak, i) => (
                             <div key={i} className={`p-3 rounded-lg border text-sm ${SEVERITY_COLOR[leak.severity]}`}>
                               <div className="flex items-center gap-2 mb-1">
-                                <span className={`w-1.5 h-1.5 rounded-full ${
-                                  leak.severity === 'high' ? 'bg-red-400' : leak.severity === 'medium' ? 'bg-yellow-400' : 'bg-blue-400'
-                                }`} />
+                                <span className={`w-1.5 h-1.5 rounded-full ${leak.severity === 'high' ? 'bg-red-400' : leak.severity === 'medium' ? 'bg-yellow-400' : 'bg-blue-400'}`} />
                                 <span className="font-medium capitalize">{leak.type.replace(/_/g, ' ')}</span>
                                 <span className="ml-auto text-xs opacity-70">{leak.severity}</span>
                               </div>
@@ -219,7 +243,7 @@ export default function PlayersPage() {
                       <span className="ml-2 px-2 py-0.5 rounded-full bg-orange-500/20 text-orange-400 text-xs">{report!.tiltSpots.length}</span>
                     </div>
                     <p className="text-sm text-gray-400 mb-4">
-                      {report!.tiltSpots.length} session(s) showed signs of tilt (4+ consecutive losing hands, ≥5BB down).
+                      {report!.tiltSpots.length} session(s) with 4+ consecutive losing hands ≥5BB down.
                     </p>
                     <div className="space-y-2">
                       {report!.tiltSpots.map((spot, i) => (
@@ -235,7 +259,7 @@ export default function PlayersPage() {
                   </div>
                 )}
 
-                {/* By position */}
+                {/* Profit by position */}
                 {Object.keys(report!.byPosition).length > 0 && (
                   <div className="rounded-xl border border-gray-800 bg-[#161B22] p-5">
                     <h3 className="text-sm font-semibold text-gray-200 mb-4">Profit by Position</h3>
@@ -258,7 +282,7 @@ export default function PlayersPage() {
                   </div>
                 )}
 
-                {/* By street */}
+                {/* Profit by street */}
                 {Object.keys(report!.byStage).length > 1 && (
                   <div className="rounded-xl border border-gray-800 bg-[#161B22] p-5">
                     <h3 className="text-sm font-semibold text-gray-200 mb-4">Profit by Street</h3>
@@ -271,10 +295,8 @@ export default function PlayersPage() {
                             <div className="w-20 text-sm text-gray-400 capitalize">{stage}</div>
                             <div className="flex-1">
                               <div className="h-2 rounded-full bg-gray-800 overflow-hidden">
-                                <div
-                                  className={`h-full rounded-full transition-all ${data.profit >= 0 ? 'bg-green-500' : 'bg-red-500'}`}
-                                  style={{ width: `${Math.min(100, Math.abs(data.profit / (data.hands * 1))) * 5}%` }}
-                                />
+                                <div className={`h-full rounded-full transition-all ${data.profit >= 0 ? 'bg-green-500' : 'bg-red-500'}`}
+                                  style={{ width: `${Math.min(100, Math.abs(data.profit / (data.hands * 1))) * 5}%` }} />
                               </div>
                             </div>
                             <div className="w-16 text-right">
@@ -291,7 +313,7 @@ export default function PlayersPage() {
                   </div>
                 )}
 
-                {/* By action */}
+                {/* Profit by action */}
                 {Object.keys(report!.byAction).length > 0 && (
                   <div className="rounded-xl border border-gray-800 bg-[#161B22] p-5">
                     <h3 className="text-sm font-semibold text-gray-200 mb-4">Profit by Action</h3>
@@ -307,7 +329,7 @@ export default function PlayersPage() {
                         </thead>
                         <tbody>
                           {Object.entries(report!.byAction)
-                            .sort((a, b) => (b[1].profit) - (a[1].profit))
+                            .sort((a, b) => b[1].profit - a[1].profit)
                             .map(([action, data]) => (
                               <tr key={action} className="border-t border-gray-800/50">
                                 <td className="py-2.5 text-gray-300">{ACTION_LABELS[action] ?? action}</td>
@@ -345,25 +367,22 @@ export default function PlayersPage() {
                   </div>
                 )}
 
-                {/* Bluff analysis */}
+                {/* Bluff record */}
                 {report!.bluffAnalysis.totalBluffs > 0 && (
                   <div className="rounded-xl border border-gray-800 bg-[#161B22] p-5">
                     <h3 className="text-sm font-semibold text-gray-200 mb-3">Bluff Record</h3>
                     <div className="grid grid-cols-3 gap-4">
-                      <div>
-                        <div className="text-xs text-gray-500">Total Bluffs</div>
-                        <div className="text-xl font-mono font-bold text-white">{report!.bluffAnalysis.totalBluffs}</div>
-                      </div>
-                      <div>
-                        <div className="text-xs text-gray-500">Called</div>
-                        <div className="text-xl font-mono font-bold text-red-400">{report!.bluffAnalysis.bluffsCalled}</div>
-                      </div>
-                      <div>
-                        <div className="text-xs text-gray-500">Success Rate</div>
-                        <div className={`text-xl font-mono font-bold ${report!.bluffAnalysis.bluffSuccessRate >= 50 ? 'text-green-400' : 'text-yellow-400'}`}>
-                          {report!.bluffAnalysis.bluffSuccessRate.toFixed(0)}%
+                      {[
+                        { label: "Total Bluffs", value: report!.bluffAnalysis.totalBluffs.toString() },
+                        { label: "Called", value: report!.bluffAnalysis.bluffsCalled.toString(), color: "text-red-400" },
+                        { label: "Success Rate", value: `${report!.bluffAnalysis.bluffSuccessRate.toFixed(0)}%`,
+                          color: report!.bluffAnalysis.bluffSuccessRate >= 50 ? "text-green-400" : "text-yellow-400" },
+                      ].map((s) => (
+                        <div key={s.label}>
+                          <div className="text-xs text-gray-500">{s.label}</div>
+                          <div className={`text-xl font-mono font-bold ${(s as { color?: string }).color ?? "text-white"}`}>{s.value}</div>
                         </div>
-                      </div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -374,57 +393,310 @@ export default function PlayersPage() {
 
         {/* ── OPPONENTS ── */}
         {tab === "opponents" && (
-          <div>
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-gray-400">
+                {opponents.length === 0 ? "No opponent data yet" : `${opponents.length} opponent${opponents.length !== 1 ? "s" : ""}`}
+              </p>
+              <div className="flex gap-3">
+                <button
+                  onClick={handleRebuildOpponents}
+                  disabled={rebuildingOpponents}
+                  className="px-4 py-1.5 rounded-lg bg-gray-800 text-gray-300 text-xs hover:bg-gray-700 transition-colors disabled:opacity-50"
+                >
+                  {rebuildingOpponents ? "Rebuilding..." : "Rebuild from Hands"}
+                </button>
+                <Link href="/session"
+                  className="px-4 py-1.5 rounded-lg bg-[#1DB954] text-black text-xs font-semibold hover:bg-[#1ed86a] transition-colors">
+                  Log More
+                </Link>
+              </div>
+            </div>
+
             {opponents.length === 0 ? (
               <div className="text-center py-16">
                 <div className="text-5xl mb-4">👥</div>
                 <h2 className="text-2xl font-bold mb-3">No opponents yet</h2>
                 <p className="text-gray-400 max-w-md mx-auto mb-6">
-                  Import hand histories from your sessions to auto-build opponent profiles.
+                  Import hand histories or log hands with opponent names. Stats are computed automatically.
                 </p>
                 <Link href="/session" className="inline-block px-5 py-2 rounded-lg bg-[#1DB954] text-black text-sm font-semibold hover:bg-[#1ed86a] transition-colors">
                   Go to Session
                 </Link>
               </div>
             ) : (
-              <div className="space-y-3">
-                {opponents.map((opp) => (
-                  <div key={opp.name} className="rounded-xl border border-gray-800 bg-[#161B22] p-4 flex items-center justify-between">
-                    <div>
-                      <div className="text-sm font-medium text-white">{opp.name}</div>
-                      <div className="flex gap-4 mt-1 text-xs text-gray-500">
-                        <span>{opp.hands}h</span>
-                        {opp.vpip !== undefined && <span>VPIP: {opp.vpip}%</span>}
-                        {opp.pfr !== undefined && <span>PFR: {opp.pfr}%</span>}
-                        {opp.playerType && <span className="text-gray-400 capitalize">{opp.playerType.replace('_', ' ')}</span>}
+              <>
+                {/* VPIP / PFR scatter summary */}
+                <div className="rounded-xl border border-gray-800 bg-[#161B22] p-5">
+                  <h3 className="text-sm font-semibold text-gray-200 mb-4">VPIP vs PFR — All Opponents</h3>
+                  <div className="space-y-2">
+                    {opponents.map((opp) => (
+                      <div key={opp.name} className="flex items-center gap-4 py-1.5 border-b border-gray-800/50 last:border-0">
+                        <div className="w-36 text-sm text-white truncate">{opp.name}</div>
+                        <div className="flex gap-4 flex-1">
+                          {[
+                            { label: "VPIP", value: opp.vpip, good: opp.vpip !== undefined && opp.vpip >= 20 && opp.vpip <= 30 },
+                            { label: "PFR", value: opp.pfr, good: opp.pfr !== undefined && opp.pfr >= 15 },
+                            { label: "AF", value: opp.af, good: opp.af !== undefined && opp.af >= 1.5 && opp.af <= 3 },
+                            { label: "WTSD", value: opp.wtsd, good: opp.wtsd !== undefined && opp.wtsd >= 25 && opp.wtsd <= 40 },
+                            { label: "W$SD", value: opp.w$sd, good: opp.w$sd !== undefined && opp.w$sd >= 48 },
+                          ].map(({ label, value, good }) => (
+                            <div key={label} className="text-center">
+                              <div className="text-xs text-gray-600">{label}</div>
+                              <div className={`text-sm font-mono font-medium ${value === undefined ? 'text-gray-600' : good ? 'text-green-400' : 'text-yellow-400'}`}>
+                                {value !== undefined ? `${value}%` : '—'}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        {opp.playerType && opp.playerType !== 'unknown' && (
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${PLAYER_TYPE_COLORS[opp.playerType] ?? 'bg-gray-500/20 text-gray-300'}`}>
+                            {opp.playerType.replace('_', ' ')}
+                          </span>
+                        )}
+                        <span className="text-xs text-gray-600 w-16 text-right">{opp.hands}h</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Per-opponent detail cards */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {opponents.map((opp) => (
+                    <div key={opp.name} className="rounded-xl border border-gray-800 bg-[#161B22] p-4">
+                      <div className="flex items-center justify-between mb-3">
+                        <div>
+                          <div className="text-sm font-semibold text-white">{opp.name}</div>
+                          <div className="text-xs text-gray-500 mt-0.5">{opp.hands} hands</div>
+                        </div>
+                        {opp.playerType && (
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${PLAYER_TYPE_COLORS[opp.playerType] ?? 'bg-gray-500/20 text-gray-300'}`}>
+                            {opp.playerType.replace('_', ' ')}
+                          </span>
+                        )}
+                      </div>
+                      <div className="grid grid-cols-3 gap-3">
+                        {[
+                          { label: "VPIP", value: opp.vpip !== undefined ? `${opp.vpip}%` : "—",
+                            desc: "Voluntarily in pot %" },
+                          { label: "PFR", value: opp.pfr !== undefined ? `${opp.pfr}%` : "—",
+                            desc: "Preflop raise %" },
+                          { label: "AF", value: opp.af !== undefined ? `${opp.af}` : "—",
+                            desc: "Aggression factor" },
+                          { label: "WTSD", value: opp.wtsd !== undefined ? `${opp.wtsd}%` : "—",
+                            desc: "Went to showdown %" },
+                          { label: "W$SD", value: opp.w$sd !== undefined ? `${opp.w$sd}%` : "—",
+                            desc: "Won at showdown %" },
+                          { label: "River Call", value: opp.riverCall !== undefined ? `${opp.riverCall}%` : "—",
+                            desc: "River call %" },
+                        ].map(({ label, value, desc }) => (
+                          <div key={label}>
+                            <div className="text-xs text-gray-500">{label}</div>
+                            <div className="text-base font-mono font-bold text-white">{value}</div>
+                            <div className="text-xs text-gray-600">{desc}</div>
+                          </div>
+                        ))}
                       </div>
                     </div>
-                    <div className="text-xs text-gray-600">
-                      Last seen {new Date(opp.lastSeen).toLocaleDateString()}
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              </>
             )}
           </div>
         )}
 
-        {/* ── STATS ── */}
-        {tab === "stats" && globalStats && (
-          <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-            {[
-              { label: "Sessions", value: globalStats.totalSessions.toString() },
-              { label: "Total Hands", value: globalStats.totalHands.toLocaleString() },
-              { label: "Net Profit", value: `${globalStats.totalProfit >= 0 ? "+" : ""}${globalStats.totalProfit.toFixed(2)}BB`,
-                color: globalStats.totalProfit >= 0 ? "text-green-400" : "text-red-400" },
-              { label: "Biggest Win", value: `+${globalStats.biggestWin.toFixed(2)}BB`, color: "text-green-400" },
-              { label: "Biggest Loss", value: `${globalStats.biggestLoss.toFixed(2)}BB`, color: "text-red-400" },
-            ].map((stat) => (
-              <div key={stat.label} className="rounded-xl border border-gray-800 bg-[#161B22] p-5">
-                <div className="text-xs text-gray-500 mb-1">{stat.label}</div>
-                <div className={`text-2xl font-mono font-bold ${(stat as { color?: string }).color ?? "text-white"}`}>{stat.value}</div>
+        {/* ── SESSIONS ── */}
+        {tab === "sessions" && (
+          <div className="space-y-6">
+            {sessions.length === 0 ? (
+              <div className="text-center py-16">
+                <div className="text-5xl mb-4">📋</div>
+                <h2 className="text-2xl font-bold mb-3">No sessions yet</h2>
+                <p className="text-gray-400">Start logging to see your session history.</p>
+                <Link href="/session" className="inline-block mt-6 px-5 py-2 rounded-lg bg-[#1DB954] text-black text-sm font-semibold hover:bg-[#1ed86a] transition-colors">
+                  Start Session
+                </Link>
               </div>
-            ))}
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Session list */}
+                <div className="space-y-3">
+                  <div className="text-sm font-medium text-gray-400 mb-2">{sessions.length} sessions</div>
+                  {sessions.map((s) => {
+                    const net = (s.cashOut ?? 0) - (s.buyIn ?? 0);
+                    return (
+                      <button
+                        key={s.id}
+                        onClick={() => handleSelectSession(s.id)}
+                        className={`w-full text-left p-3 rounded-xl border transition-colors ${
+                          activeSession?.session?.id === s.id
+                            ? "border-[#1DB954]/50 bg-[#1DB954]/5"
+                            : "border-gray-800 bg-[#161B22] hover:border-gray-700"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-medium text-white">{s.gameType} {s.stakes ?? ""}</span>
+                          <span className={`text-sm font-mono font-medium ${net >= 0 ? "text-green-400" : "text-red-400"}`}>
+                            {net >= 0 ? "+" : ""}{net.toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-xs text-gray-500">
+                          <span>{s.date}</span>
+                          <span>BI ${s.buyIn}</span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Session detail */}
+                <div className="lg:col-span-2">
+                  {!activeSession?.session ? (
+                    <div className="rounded-xl border border-gray-800 bg-[#161B22] p-8 flex items-center justify-center h-full">
+                      <p className="text-gray-500 text-sm">Select a session to view breakdown</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {/* Session summary */}
+                      <div className="rounded-xl border border-gray-800 bg-[#161B22] p-5">
+                        <div className="flex items-center justify-between mb-4">
+                          <div>
+                            <h3 className="text-sm font-semibold text-white">
+                              {activeSession.session.gameType} {activeSession.session.stakes ?? ""}
+                            </h3>
+                            <p className="text-xs text-gray-500">{activeSession.session.date}</p>
+                          </div>
+                          <div className="flex gap-2">
+                            <span className={`text-lg font-mono font-bold ${activeSession.stats!.totalProfit >= 0 ? "text-green-400" : "text-red-400"}`}>
+                              {activeSession.stats!.totalProfit >= 0 ? "+" : ""}{activeSession.stats!.totalProfit.toFixed(2)}BB
+                            </span>
+                            <button onClick={() => handleDeleteSession(activeSession!.session!.id)}
+                              className="ml-4 text-gray-600 hover:text-red-400 text-xs transition-colors self-start">✕ Delete</button>
+                          </div>
+                        </div>
+
+                        {/* Key stats row */}
+                        <div className="grid grid-cols-4 gap-3">
+                          {[
+                            { label: "Hands", value: activeSession.stats!.totalHands.toString() },
+                            { label: "Won", value: activeSession.stats!.byResult.wins.toString() },
+                            { label: "Lost", value: activeSession.stats!.byResult.losses.toString() },
+                            { label: "BB/100", value: activeSession.stats!.totalHands > 0
+                              ? `${((activeSession.stats!.totalProfit / activeSession.stats!.totalHands) * 100).toFixed(2)}`
+                              : "—" },
+                          ].map((s) => (
+                            <div key={s.label} className="text-center">
+                              <div className="text-xs text-gray-600">{s.label}</div>
+                              <div className="text-sm font-mono font-bold text-white">{s.value}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* By position */}
+                      {Object.keys(activeSession.stats!.byPosition).length > 0 && (
+                        <div className="rounded-xl border border-gray-800 bg-[#161B22] p-5">
+                          <h4 className="text-sm font-semibold text-gray-200 mb-3">By Position</h4>
+                          <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5">
+                            {POSITION_ORDER.filter((p) => activeSession.stats!.byPosition[p]).map((pos) => {
+                              const data = activeSession.stats!.byPosition[pos]!;
+                              return (
+                                <div key={pos} className="p-1.5 rounded-lg text-center border border-gray-800">
+                                  <div className="text-xs text-gray-600">{pos}</div>
+                                  <div className={`text-xs font-mono font-bold ${data.profit >= 0 ? "text-green-400" : "text-red-400"}`}>
+                                    {data.profit >= 0 ? "+" : ""}{data.profit.toFixed(1)}
+                                  </div>
+                                  <div className="text-xs text-gray-700">{data.hands}h</div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* By street */}
+                      {Object.keys(activeSession.stats!.byStage).length > 1 && (
+                        <div className="rounded-xl border border-gray-800 bg-[#161B22] p-5">
+                          <h4 className="text-sm font-semibold text-gray-200 mb-3">By Street</h4>
+                          <div className="space-y-2">
+                            {STAGE_ORDER.filter((s) => activeSession.stats!.byStage[s]).map((stage) => {
+                              const data = activeSession.stats!.byStage[stage]!;
+                              return (
+                                <div key={stage} className="flex items-center gap-3">
+                                  <div className="w-16 text-xs text-gray-400 capitalize">{stage}</div>
+                                  <div className="flex-1 h-2 rounded-full bg-gray-800 overflow-hidden">
+                                    <div className={`h-full rounded-full ${data.profit >= 0 ? "bg-green-500" : "bg-red-500"}`}
+                                      style={{ width: `${Math.min(100, Math.abs(data.profit / (data.hands * 0.5))) * 5}%` }} />
+                                  </div>
+                                  <div className={`text-xs font-mono font-medium ${data.profit >= 0 ? "text-green-400" : "text-red-400"}`}>
+                                    {data.profit >= 0 ? "+" : ""}{data.profit.toFixed(1)}BB
+                                  </div>
+                                  <div className="text-xs text-gray-600 w-12 text-right">{data.hands}h</div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* By action */}
+                      {Object.keys(activeSession.stats!.byAction).length > 0 && (
+                        <div className="rounded-xl border border-gray-800 bg-[#161B22] p-5">
+                          <h4 className="text-sm font-semibold text-gray-200 mb-3">By Action</h4>
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-sm">
+                              <thead>
+                                <tr className="text-gray-600 text-xs">
+                                  <th className="text-left pb-2 font-medium">Action</th>
+                                  <th className="text-right pb-2 font-medium">Hands</th>
+                                  <th className="text-right pb-2 font-medium">Total</th>
+                                  <th className="text-right pb-2 font-medium">BB/h</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {Object.entries(activeSession.stats!.byAction)
+                                  .sort((a, b) => b[1].profit - a[1].profit)
+                                  .map(([action, data]) => (
+                                    <tr key={action} className="border-t border-gray-800/50">
+                                      <td className="py-2 text-gray-300">{ACTION_LABELS[action] ?? action}</td>
+                                      <td className="py-2 text-right text-gray-500">{data.hands}</td>
+                                      <td className={`py-2 text-right font-mono font-medium ${data.profit >= 0 ? "text-green-400" : "text-red-400"}`}>
+                                        {data.profit >= 0 ? "+" : ""}{data.profit.toFixed(2)}
+                                      </td>
+                                      <td className={`py-2 text-right font-mono ${data.profit / data.hands >= 0 ? "text-green-400/70" : "text-red-400/70"}`}>
+                                        {(data.profit / data.hands) >= 0 ? "+" : ""}{(data.profit / data.hands).toFixed(2)}
+                                      </td>
+                                    </tr>
+                                  ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Tags */}
+                      {Object.keys(activeSession.stats!.byTag).length > 0 && (
+                        <div className="rounded-xl border border-gray-800 bg-[#161B22] p-5">
+                          <h4 className="text-sm font-semibold text-gray-200 mb-3">Tags</h4>
+                          <div className="flex flex-wrap gap-2">
+                            {Object.entries(activeSession.stats!.byTag).map(([tag, data]) => (
+                              <div key={tag} className="px-3 py-1.5 rounded-lg bg-[#0D1117] border border-gray-800">
+                                <span className="text-xs text-gray-400">{tag}</span>
+                                <span className="mx-1.5 text-gray-700">·</span>
+                                <span className={`text-sm font-mono font-medium ${data.profit >= 0 ? "text-green-400" : "text-red-400"}`}>
+                                  {data.profit >= 0 ? "+" : ""}{data.profit.toFixed(1)}BB
+                                </span>
+                                <span className="ml-1.5 text-xs text-gray-600">{data.count}h</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
