@@ -21,6 +21,7 @@ export default function LearnPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <LearnCard href="/learn/basics" title="Poker Basics" description="Hand rankings, game flow, betting actions, and core concepts." icon="📖" />
           <LearnCard href="/learn/betting" title="Betting Strategies" description="C-bet, 3-bet, squeeze, check-raise — when and how much to bet." icon="💰" />
+          <LearnCard href="/learn/faq" title="FAQ" description="Common poker questions — pot odds, 3-bets, tiebreakers, and more." icon="❓" />
         </div>
       </div>
     </div>
